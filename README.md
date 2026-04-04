@@ -1,5 +1,5 @@
 ```bash
-conda create -n xuance_drones_env python=3.10.20 && conda activate xuance_env
+conda create -n xuance_drones_env python=3.10.20 && conda activate xuance_drones_env
 ```
 
 ```bash
