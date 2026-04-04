@@ -1,6 +1,10 @@
 ```bash
 conda create -n xuance_drones_env python=3.10.20 && conda activate xuance_drones_env
 ```
+```bash
+# 安装 PyTorch 2.6+ with CUDA 12.8
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+```
 
 ```bash
 cd xuance
