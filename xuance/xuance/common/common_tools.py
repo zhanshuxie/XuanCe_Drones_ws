@@ -42,7 +42,7 @@ def load_yaml(file_dir) -> dict:
     Returns:
         config_dict: the keys and corresponding values in the YAML file.
     """
-    with open(file_dir, "r") as f:
+    with open(file_dir, "r", encoding="utf-8") as f:
         try:
             config_dict = yaml.load(f, Loader=yaml.FullLoader)
         except yaml.YAMLError as exc:

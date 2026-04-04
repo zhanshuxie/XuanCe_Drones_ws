@@ -111,6 +111,11 @@ class RunnerDRL(RunnerBase):
         model_path = kwargs.get('model_path', self.agent.model_dir_load)
         model_name = kwargs.get('model_name', None)
         test_episodes = kwargs.get('test_episodes', self.config.test_episode)
+        # Close training envs before creating test envs to avoid duplicate GUI connections
+        # (e.g. PyBullet only allows one local GUI connection at a time).
+        if self.envs is not None:
+            self.envs.close()
+            self.envs = None
         test_envs = make_envs(config_test)
 
         if self.rank == 0:

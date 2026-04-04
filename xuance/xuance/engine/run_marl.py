@@ -20,8 +20,13 @@ class RunnerMARL(RunnerBase):
         # Store configuration
         self.config = config
         self.env_id = self.config.env_id
-        
-        super(RunnerMARL, self).__init__(self.config, envs, agent, manage_resources)
+
+        # Training envs always use DIRECT (render=False); GUI is reserved for test envs.
+        env_config = deepcopy(config) if envs is None else config
+        if envs is None:
+            env_config.render = False
+
+        super(RunnerMARL, self).__init__(env_config if envs is None else config, envs, agent, manage_resources)
 
         # Build agent if not injected externally
         if getattr(self.config, 'dl_toolbox', 'torch'):
@@ -55,6 +60,14 @@ class RunnerMARL(RunnerBase):
         config_test.render_mode = kwargs.get('render_mode', getattr(self.config, 'render_mode', 'human'))
         model_path = kwargs.get('model_path', self.agent.model_dir_load)
         test_episodes = kwargs.get('test_episodes', self.config.test_episode)
+
+        # Release existing PyBullet client(s) before opening a GUI test env (single GUI allowed).
+        if getattr(config_test, "render", False) and getattr(self, "_own_envs", False) and self.envs is not None:
+            try:
+                self.envs.close()
+            finally:
+                self.envs = None
+
         test_envs = make_envs(config_test)
 
         if self.rank == 0:
@@ -98,9 +111,10 @@ class RunnerMARL(RunnerBase):
         config_dict.pop("observation_space", None)
         config_dict.pop("action_space", None)
 
-        # Prepare testing environments.
+        # Prepare testing environments (DIRECT mode to avoid PyBullet GUI conflict).
         config_test = deepcopy(self.config)
-        config_test.parallels = 1  # config_test.test_episode
+        config_test.parallels = 1
+        config_test.render = False
         test_envs = make_envs(config_test)
 
         train_steps = max(1, running_steps // self.n_envs)
