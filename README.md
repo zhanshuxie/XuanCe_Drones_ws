@@ -19,7 +19,7 @@ pip install -e .
 ```
 
 # ablation experiments
-[details](doc\ablation.md)
+[details](.\doc\ablation.md)
 
 step 1: 分别训练MAPPO规划器和PPO导航器各10M步，每100k步保存一个checkpoint（共100个）+ 最优模型。
 
@@ -36,7 +36,7 @@ python eval_hierarchical.py --ckpt-root checkpoints --max-low-steps 32 --output 
 ```
 
 # benchmark
-[details](doc\benchmark.md)
+[details](.\doc\benchmark.md)
 
 ```bash
 cd ./xuance/examples/drones/
