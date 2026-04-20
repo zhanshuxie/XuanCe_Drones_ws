@@ -1,16 +1,20 @@
 """
-分层部署脚本 — MAPPO 高层规划器 + PPO 低层导航控制器
+三维分层部署脚本 — MAPPO 三维高层规划器 + PPO 低层导航控制器
 
-将训练好的 MAPPO 规划器（SimpleSpreadDrones 2D 环境训练）与
+将训练好的 MAPPO 三维规划器（SimpleSpreadDrones3DPlanner 环境训练）与
 Navigate PPO 控制器（单无人机 A→B 飞行）拼接，在 PyBullet 中
 运行 3 架无人机无碰撞覆盖 3 个目标点。
 
+与二维版 (demo_hierarchical_deploy.py) 的核心区别：
+  - 规划器输出三维位移 (dx, dy, dz)，高度不再固定
+  - 目标点高度在 [0.5, 4.5] m 中随机生成
+
 坐标映射:
-  规划器 2D 空间 [-1, 1]  ↔  物理 XY [-scale, scale] 米
-  规划器 max_step = 0.15  →  物理位移 = 0.15 × scale 米
+  规划器 XY ∈ [-1, 1]  ↔  物理 XY ∈ [-scale, scale] 米  (scale=2.0)
+  规划器 Z  ∈ [-1, 1]  ↔  物理 Z  ∈ [0.5, 4.5] 米       (z = planner_z * 2.0 + 2.5)
 
 用法:
-    python demo_hierarchical_deploy.py --planner-model results/mappo/SimpleSpreadDrones/best_model/best_model.pth --navigate-model results/ppo/NavigateAviary/best_model/best_model.pth --render True
+    python demo_hierarchical_deploy_3d.py --planner-model results/mappo/SimpleSpreadDrones3DPlanner/best_model/best_model.pth --navigate-model results/ppo/NavigateAviary/best_model/best_model.pth --render True
 """
 import argparse
 import numpy as np
@@ -22,6 +26,19 @@ from gym_pybullet_drones.utils.enums import (
     DroneModel, Physics, ActionType, ObservationType,
 )
 from gym_pybullet_drones.envs.BaseRLAviary import BaseRLAviary
+
+
+# ---------------------------------------------------------------------------
+# Coordinate mapping helpers
+# ---------------------------------------------------------------------------
+def planner_z_to_physical(planner_z):
+    """规划器 Z ∈ [-1, 1] → 物理 Z ∈ [0.5, 4.5]"""
+    return planner_z * 2.0 + 2.5
+
+
+def physical_z_to_planner(physical_z):
+    """物理 Z ∈ [0.5, 4.5] → 规划器 Z ∈ [-1, 1]"""
+    return (physical_z - 2.5) / 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -79,15 +96,15 @@ class DeployAviary(BaseRLAviary):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def build_planner_obs(drone_pos_2d, drone_vel_2d, landmark_pos_2d, n):
-    """Construct observation dict matching SimpleSpreadDronesEnv format."""
+def build_planner_obs(drone_pos_3d, drone_vel_3d, landmark_pos_3d, n):
+    """Construct observation dict matching SimpleSpreadDrones3DPlannerEnv format."""
     obs = {}
     for i in range(n):
-        own_pos = drone_pos_2d[i]
-        own_vel = drone_vel_2d[i]
-        rel_lm = (landmark_pos_2d - own_pos).flatten()
+        own_pos = drone_pos_3d[i]
+        own_vel = drone_vel_3d[i]
+        rel_lm = (landmark_pos_3d - own_pos).flatten()
         other_idx = [j for j in range(n) if j != i]
-        rel_ag = (drone_pos_2d[other_idx] - own_pos).flatten()
+        rel_ag = (drone_pos_3d[other_idx] - own_pos).flatten()
         obs[f"agent_{i}"] = np.concatenate(
             [own_pos, own_vel, rel_lm, rel_ag]
         ).astype(np.float32)
@@ -98,20 +115,19 @@ def build_planner_obs(drone_pos_2d, drone_vel_2d, landmark_pos_2d, n):
 # Main
 # ---------------------------------------------------------------------------
 def parse_args():
-    pa = argparse.ArgumentParser("Hierarchical Deploy: MAPPO + Navigate PPO")
+    pa = argparse.ArgumentParser("Hierarchical Deploy 3D: MAPPO 3D Planner + Navigate PPO")
     pa.add_argument("--planner-model", type=str, required=True,
-                    help="Path to trained MAPPO planner (.pth or directory)")
+                    help="Path to trained MAPPO 3D planner (.pth or directory)")
     pa.add_argument("--navigate-model", type=str, required=True,
                     help="Path to trained Navigate PPO (.pth or directory)")
     pa.add_argument("--device", type=str, default="cuda:0")
     pa.add_argument("--render", type=lambda x: x.lower() == "true", default=True)
     pa.add_argument("--scale", type=float, default=2.0,
-                    help="Planner 1.0 = this many physical meters")
-    pa.add_argument("--flight-height", type=float, default=1.0)
+                    help="Planner XY 1.0 = this many physical meters")
     pa.add_argument("--max-high-steps", type=int, default=25)
-    pa.add_argument("--max-low-steps", type=int, default=64,
+    pa.add_argument("--max-low-steps", type=int, default=32,
                     help="Low-level steps per high-level planning step")
-    pa.add_argument("--seed", type=int, default=42)
+    pa.add_argument("--seed", type=int, default=10)
     return pa.parse_args()
 
 
@@ -121,10 +137,10 @@ def main():
 
     from xuance import get_runner
 
-    # ---- 1. Load MAPPO planner agent ----
-    print("[1/4] Loading MAPPO planner …")
+    # ---- 1. Load MAPPO 3D planner agent ----
+    print("[1/4] Loading MAPPO 3D planner …")
     planner_runner = get_runner(
-        algo="mappo", env="DroneSpread", env_id="SimpleSpreadDrones",
+        algo="mappo", env="DroneSpreadPlanner3D", env_id="SimpleSpreadDrones3DPlanner",
         parser_args=Namespace(parallels=1, device=args.device),
     )
     planner_agent = planner_runner.agent
@@ -147,14 +163,27 @@ def main():
     ws = 1.0                    # planner world size
     max_step = 0.15             # planner max displacement per step
     scale = args.scale
-    height = args.flight_height
 
-    drone_pos_2d = rng.uniform(-ws, ws, (N, 2)).astype(np.float32)
-    lm_pos_2d = rng.uniform(-ws, ws, (N, 2)).astype(np.float32)
-    drone_vel_2d = np.zeros((N, 2), dtype=np.float32)
+    # 无人机初始位置：XYZ 均在规划器坐标系 [-1, 1] 中随机
+    drone_pos_3d = rng.uniform(-ws, ws, (N, 3)).astype(np.float32)
+    drone_vel_3d = np.zeros((N, 3), dtype=np.float32)
 
-    init_xyz = np.column_stack([drone_pos_2d * scale, np.full(N, height)])
-    lm_xyz = np.column_stack([lm_pos_2d * scale, np.full(N, height)])
+    # 物理空间初始位置：XY = planner * scale, Z = 线性映射
+    init_xyz = np.column_stack([
+        drone_pos_3d[:, 0:2] * scale,
+        planner_z_to_physical(drone_pos_3d[:, 2]),
+    ])
+
+    # 目标点：XY 在物理空间 [-2, 2] 随机，Z 在物理空间 [0.5, 4.5] 随机
+    lm_xy_phys = rng.uniform(-scale, scale, (N, 2)).astype(np.float32)
+    lm_z_phys = rng.uniform(0.5, 4.5, (N,)).astype(np.float32)
+    lm_xyz = np.column_stack([lm_xy_phys, lm_z_phys])
+
+    # 目标点转换到规划器坐标系
+    lm_pos_3d = np.column_stack([
+        lm_xy_phys / scale,
+        physical_z_to_planner(lm_z_phys),
+    ]).astype(np.float32)
 
     print(f"  Drones  (m) : {np.round(init_xyz, 3).tolist()}")
     print(f"  Targets (m) : {np.round(lm_xyz, 3).tolist()}")
@@ -189,41 +218,40 @@ def main():
                               physicsClientId=aviary.CLIENT)
 
     # ---- 5. Hierarchical control loop ----
-    # 规划器维护的虚拟 2D agent 位置（初始 = 无人机初始 2D 位置）
-    planner_pos_2d = drone_pos_2d.copy()   # (N, 2), planner frame [-1, 1]
+    # 规划器维护的虚拟 3D agent 位置（初始 = 无人机初始 3D 位置）
+    planner_pos_3d = drone_pos_3d.copy()   # (N, 3), planner frame [-1, 1]
 
     cover_th = 0.2      # landmark 覆盖判定阈值 (m)
 
     print("\n--- Starting hierarchical control ---")
     for hi in range(args.max_high_steps):
-        # 5-a  读取无人机实际 2D 位置（投影到规划器坐标系，用于观测）
+        # 5-a  读取无人机实际 3D 位置，转换到规划器坐标系
         for i in range(N):
-            drone_pos_2d[i] = aviary._getDroneStateVector(i)[0:2] / scale
+            phys_pos = aviary._getDroneStateVector(i)[0:3]
+            drone_pos_3d[i, 0:2] = phys_pos[0:2] / scale
+            drone_pos_3d[i, 2] = physical_z_to_planner(phys_pos[2])
 
         # 5-b  构建规划器观测（用无人机实际位置）
-        planner_obs = build_planner_obs(drone_pos_2d, drone_vel_2d, lm_pos_2d, N)
+        planner_obs = build_planner_obs(drone_pos_3d, drone_vel_3d, lm_pos_3d, N)
 
         # 5-c  MAPPO 推理
         out = planner_agent.action([planner_obs], test_mode=True)
         act_dict = out["actions"][0]       # {agent_i: np.ndarray}
 
-        # 5-d  2D 位移更新虚拟位置 → 映射为 3D 绝对航点
+        # 5-d  3D 位移更新虚拟位置 → 映射为 3D 绝对航点
         wp3 = np.zeros((N, 3))
         for i in range(N):
-            d2 = np.clip(act_dict[f"agent_{i}"][:2], -1, 1) * max_step
-            drone_vel_2d[i] = d2           # 记录速度供下次观测
+            d3 = np.clip(act_dict[f"agent_{i}"][:3], -1, 1) * max_step
+            drone_vel_3d[i] = d3           # 记录速度供下次观测
 
             # 更新规划器内部虚拟位置
-            planner_pos_2d[i] = np.clip(
-                drone_pos_2d[i] + d2, -ws, ws
+            planner_pos_3d[i] = np.clip(
+                drone_pos_3d[i] + d3, -ws, ws
             )
 
-            # 航点 = 虚拟位置映射到物理空间，z 固定在目标高度
-            wp3[i] = np.array([
-                planner_pos_2d[i, 0] * scale,
-                planner_pos_2d[i, 1] * scale,
-                height,                     # 固定高度
-            ])
+            # 航点 = 虚拟位置映射到物理空间
+            wp3[i, 0:2] = np.clip(planner_pos_3d[i, 0:2] * scale, -scale, scale)
+            wp3[i, 2] = np.clip(planner_z_to_physical(planner_pos_3d[i, 2]), 0.5, 4.5)
 
         aviary.set_waypoints(wp3)
 

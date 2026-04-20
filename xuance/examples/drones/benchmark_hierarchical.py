@@ -1,19 +1,13 @@
 """
-分层部署评估脚本 — 消融实验用
+分层算法 Benchmark 脚本 — 与 flat benchmark 对齐的奖励计算
 
-加载训练好的MAPPO规划器 + PPO导航器的checkpoint，
-在PyBullet中运行分层部署，计算MPE simple_spread奖励。
-
-对每个checkpoint（100k, 200k, ..., 10000k）运行10轮，
-计算平均奖励，输出CSV。
-
-消融变量: --max-low-steps (8/16/32/64)
+与 eval_hierarchical.py 的唯一区别：
+  奖励在每个低层 step 计算一次（共 25×max_low_steps 次/episode），
+  而非每个高层决策步计算一次（25次/episode）。
+  这样 episode return 与 benchmark_flat_3d.py 可直接比较。
 
 用法:
-    python eval_hierarchical.py --ckpt-root checkpoints --max-low-steps 8  --output results_mls8.csv
-    python eval_hierarchical.py --ckpt-root checkpoints --max-low-steps 16 --output results_mls16.csv
-    python eval_hierarchical.py --ckpt-root checkpoints --max-low-steps 32 --output results_mls32.csv
-    python eval_hierarchical.py --ckpt-root checkpoints --max-low-steps 64 --output results_mls64.csv
+    python benchmark_hierarchical.py --ckpt-root checkpoints --max-low-steps 64 --output benchmark_hier.csv
 """
 import os
 import csv
@@ -29,7 +23,7 @@ from gym_pybullet_drones.envs.BaseRLAviary import BaseRLAviary
 
 
 # ---------------------------------------------------------------------------
-# DeployAviary — 与 demo_hierarchical_deploy.py 完全相同
+# DeployAviary — 与 eval_hierarchical.py 完全相同
 # ---------------------------------------------------------------------------
 class DeployAviary(BaseRLAviary):
     """
@@ -105,7 +99,7 @@ def navigator_deterministic_action(nav_agent, obs):
 
 
 # ---------------------------------------------------------------------------
-# Helpers — 与 demo_hierarchical_deploy.py 完全相同
+# Helpers — 与 eval_hierarchical.py 完全相同
 # ---------------------------------------------------------------------------
 def build_planner_obs(drone_pos_2d, drone_vel_2d, landmark_pos_2d, n):
     """Construct observation dict matching SimpleSpreadDronesEnv format."""
@@ -147,12 +141,14 @@ def compute_reward_3d(aviary, lm_xyz, n, collision_radius=0.15, collision_penalt
 
 # ---------------------------------------------------------------------------
 # 批量评估（多个并行环境）
+# 与 eval_hierarchical.py 的唯一区别：奖励在每个低层 step 计算
 # ---------------------------------------------------------------------------
 def run_episodes_batch(planner_agent, nav_agent, scenarios_batch,
                        max_low_steps, max_high_steps=25,
                        scale=2.0, flight_height=1.0):
     """
     同时运行多个 episode（多个 PyBullet DIRECT 实例并存）。
+    奖励在每个低层 step 计算一次，与 flat benchmark 对齐。
 
     Parameters
     ----------
@@ -250,13 +246,16 @@ def run_episodes_batch(planner_agent, nav_agent, scenarios_batch,
             for e in envs:
                 e['aviary'].step(e['_actions'])
 
-        # 统计到达率 + 奖励
+            # ★ 每个低层 step 计算奖励（与 flat benchmark 对齐）
+            for e in envs:
+                e['ep_reward'] += compute_reward_3d(e['aviary'], e['lm_xyz'], N)
+
+        # 统计到达率（保留在高层循环）
         for e in envs:
             av = e['aviary']
             arrived = sum(1 for i in range(N)
                           if np.linalg.norm(av._getDroneStateVector(i)[0:3] - e['wp3'][i]) < reach_th)
             e['arrival_rates'].append(arrived / N)
-            e['ep_reward'] += compute_reward_3d(av, e['lm_xyz'], N)
 
     # ---- 收集结果并关闭环境 ----
     results = []
@@ -272,14 +271,14 @@ def run_episodes_batch(planner_agent, nav_agent, scenarios_batch,
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Main — 与 eval_hierarchical.py 完全相同
 # ---------------------------------------------------------------------------
 def parse_args():
-    pa = argparse.ArgumentParser("Hierarchical Deployment Evaluation for Ablation")
+    pa = argparse.ArgumentParser("Hierarchical Benchmark (per-step reward)")
     pa.add_argument("--ckpt-root", type=str, default="checkpoints",
                     help="Root directory containing planner/ and navigator/ checkpoints")
-    pa.add_argument("--max-low-steps", type=int, default=32,
-                    help="Low-level steps per high-level step (ablation variable: 8/16/32/64)")
+    pa.add_argument("--max-low-steps", type=int, default=64,
+                    help="Low-level steps per high-level step")
     pa.add_argument("--max-high-steps", type=int, default=25,
                     help="Max high-level planning steps per episode")
     pa.add_argument("--scale", type=float, default=2.0)
@@ -288,13 +287,13 @@ def parse_args():
                     help="Number of episodes per checkpoint")
     pa.add_argument("--parallels", type=int, default=5,
                     help="Number of parallel environments")
-    pa.add_argument("--seed", type=int, default=42,
-                    help="Base random seed for reproducibility")
+    pa.add_argument("--seed", type=int, default=1,
+                    help="Base random seed (matches flat benchmark env_seed)")
     pa.add_argument("--device", type=str, default="cuda:0")
     pa.add_argument("--nav-ckpt", type=str, default="checkpoints/navigator/best/model.pth",
                     help="Fixed navigator checkpoint path (best model)")
     pa.add_argument("--output", type=str, default=None,
-                    help="Output CSV path (default: results_mls{max-low-steps}.csv)")
+                    help="Output CSV path (default: benchmark_hier_mls{max-low-steps}.csv)")
     return pa.parse_args()
 
 
@@ -302,10 +301,11 @@ def main():
     args = parse_args()
 
     if args.output is None:
-        args.output = f"results_mls{args.max_low_steps}.csv"
+        args.output = f"benchmark_hier_mls{args.max_low_steps}.csv"
 
     print("=" * 60)
-    print(f"Hierarchical Evaluation | max-low-steps = {args.max_low_steps}")
+    print(f"Hierarchical Benchmark | max-low-steps = {args.max_low_steps}")
+    print(f"  Reward computed per low-level step (aligned with flat benchmark)")
     print("=" * 60)
 
     from xuance import get_runner
@@ -332,21 +332,47 @@ def main():
         print(f"  Navigator fixed at: {args.nav_ckpt}")
         nav_agent.load_model(args.nav_ckpt)
 
-    # ---- 2. 预生成所有场景（保证不同MLS运行使用完全相同的起点/目标点） ----
+    # ---- 2. 预生成所有场景（复现 flat benchmark 测试环境的 rng 行为） ----
+    # flat benchmark: 5 个并行测试 env，seed 分别为 env_seed+0 ~ env_seed+4
+    # 每次 eval: 每个 env reset 3 次 (2 轮计分 + 1 次 extra auto-reset)
+    # rng 状态在 eval 间累积，不重置
     N = 3
-    master_rng = np.random.default_rng(args.seed)
+    ws = 2.0                       # world_size
+    n_test_parallel = 5            # 与 flat benchmark 的 test_parallels 对齐
+    episodes_per_env = args.episodes // n_test_parallel  # = 2
+    resets_per_eval = episodes_per_env + 1  # 2 轮计分 + 1 次 extra = 3
+
+    # 创建 5 个独立的 rng，与 flat 的 5 个测试 env 一一对应
+    rngs = [np.random.default_rng(args.seed + i) for i in range(n_test_parallel)]
+
+    # 跳过 flat benchmark step=0 的初始 eval（hierarchical 没有这次 eval）
+    for rng in rngs:
+        for _ in range(resets_per_eval):
+            rng.uniform(-ws, ws, (N, 2))  # drone_xy
+            rng.uniform(-ws, ws, (N, 2))  # lm_xy
+
+    # 为 100 个 checkpoint 生成场景
     scenarios = {}
     for ckpt_idx in range(100):
-        for ep in range(args.episodes):
-            drone_pos = master_rng.uniform(-1.0, 1.0, (N, 2)).astype(np.float32)
-            lm_pos = master_rng.uniform(-1.0, 1.0, (N, 2)).astype(np.float32)
-            scenarios[(ckpt_idx, ep)] = (drone_pos.copy(), lm_pos.copy())
+        # episode 顺序与 flat 一致: env0_b0, env1_b0, ..., env4_b0,
+        #                            env0_b1, env1_b1, ..., env4_b1
+        for batch in range(episodes_per_env):
+            for env_i in range(n_test_parallel):
+                drone_xy = rngs[env_i].uniform(-ws, ws, (N, 2)).astype(np.float32)
+                lm_xy = rngs[env_i].uniform(-ws, ws, (N, 2)).astype(np.float32)
+                ep_idx = batch * n_test_parallel + env_i
+                scenarios[(ckpt_idx, ep_idx)] = (drone_xy / args.scale, lm_xy / args.scale)
 
-    # 打印前3个场景用于验证一致性
-    print("[Scenario verification] First 3 scenarios (ckpt=0):")
+        # extra auto-reset（不计分，但推进 rng 状态以保持与 flat 同步）
+        for env_i in range(n_test_parallel):
+            rngs[env_i].uniform(-ws, ws, (N, 2))
+            rngs[env_i].uniform(-ws, ws, (N, 2))
+
+    # 打印前3个场景用于验证一致性（显示物理坐标，方便与 flat benchmark 对比）
+    print("[Scenario verification] First 3 scenarios (ckpt=0, physical coords):")
     for ep in range(min(3, args.episodes)):
         d, l = scenarios[(0, ep)]
-        print(f"  ep={ep}: drone={d.tolist()}, landmark={l.tolist()}")
+        print(f"  ep={ep}: drone={( d * args.scale).tolist()}, landmark={(l * args.scale).tolist()}")
     print()
 
     # ---- 3. 准备CSV ----
@@ -358,9 +384,11 @@ def main():
 
     with open(args.output, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["step", "avg_reward", "std_reward",
-                         "avg_arrival_rate", "std_arrival_rate",
-                         "avg_final_dist", "std_final_dist"])
+        header = ["step", "avg_reward", "std_reward",
+                  "avg_arrival_rate", "std_arrival_rate",
+                  "avg_final_dist", "std_final_dist"]
+        header += [f"ep_{i}_reward" for i in range(args.episodes)]
+        writer.writerow(header)
 
     # ---- 4. 遍历100个checkpoint ----
     for ckpt_idx in range(100):
@@ -418,17 +446,19 @@ def main():
         # 写入CSV
         with open(args.output, "a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow([step_k,
-                             f"{avg_reward:.4f}", f"{std_reward:.4f}",
-                             f"{avg_arrival:.4f}", f"{std_arrival:.4f}",
-                             f"{avg_final_dist:.4f}", f"{std_final_dist:.4f}"])
+            row = [step_k,
+                   f"{avg_reward:.4f}", f"{std_reward:.4f}",
+                   f"{avg_arrival:.4f}", f"{std_arrival:.4f}",
+                   f"{avg_final_dist:.4f}", f"{std_final_dist:.4f}"]
+            row += [f"{r:.4f}" for r in episode_rewards]
+            writer.writerow(row)
 
         print(f"  ckpt {step_k:>5d}k | "
               f"reward={avg_reward:>8.3f}±{std_reward:.3f} | "
               f"arrival={avg_arrival:.2f} | "
               f"final_dist={avg_final_dist:.4f}")
 
-    print(f"\nEvaluation complete. Results saved to: {os.path.abspath(args.output)}")
+    print(f"\nBenchmark complete. Results saved to: {os.path.abspath(args.output)}")
 
 
 if __name__ == "__main__":

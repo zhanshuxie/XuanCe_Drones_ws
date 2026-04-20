@@ -1,7 +1,17 @@
 agent: "MAPPO"
-env_name: "DroneSpread3D"
-env_id: "SimpleSpreadDrones3D"
+env_name: "Drones"
+env_id: "SimpleSpreadAviary3D"
 env_seed: 1
+obs_type: "kin"
+act_type: "vel"
+num_drones: 3
+num_landmarks: 3
+world_size: 2.0
+collision_radius: 0.15
+collision_penalty: 1.0
+flight_height: 1.0
+render: False
+sleep: 0.01
 continuous_action: True
 learner: "MAPPO_Learner"
 policy: "Gaussian_MAAC_Policy"
@@ -25,15 +35,15 @@ representation_hidden_size: [128, ]
 actor_hidden_size: [128, 128]
 critic_hidden_size: [128, 128]
 activation: "relu"
-activation_action: "sigmoid"
+activation_action: "tanh"
 
 # multi-agent
 use_parameter_sharing: True
 use_actions_mask: False
 
-seed: 1
+seed: 2
 parallels: 16
-buffer_size: 1600
+buffer_size: 800
 n_epochs: 5
 n_minibatch: 2
 learning_rate: 0.0005
@@ -61,6 +71,7 @@ gae_lambda: 0.95
 use_grad_clip: True
 grad_clip_norm: 10.0
 
+max_episode_steps: 1600
 running_steps: 10000000
 eval_interval: 100000
 test_episode: 5

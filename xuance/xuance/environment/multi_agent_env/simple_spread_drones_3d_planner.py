@@ -1,8 +1,8 @@
 """
-SimpleSpread for Drones — 3D 粒子环境（无 PyBullet 依赖）
+SimpleSpread for Drones — 纯 3D 粒子环境（无 PyBullet 依赖）
 
 3 个 agent（代表无人机）需无碰撞地覆盖 3 个 landmark，在三维空间中运动。
-动作为 6D 力向量（MPE 官方风格），动力学完全复现 MPE integrate_state。
+动作为 3D 位移，直接对应部署时 Navigate 模型的飞行目标。
 
 参照 MPE simple_spread 设计：
   - 合作任务，所有 agent 共享奖励
@@ -14,22 +14,19 @@ from gymnasium.spaces import Box
 from xuance.environment import RawMultiAgentEnv
 
 
-class SimpleSpreadDrones3DEnv(RawMultiAgentEnv):
+class SimpleSpreadDrones3DPlannerEnv(RawMultiAgentEnv):
     """
-    3D cooperative spread environment for drone benchmarking.
+    Pure 3D cooperative spread environment for drone high-level planning.
 
-    Each agent outputs a 6D force vector [−x, +x, −y, +y, −z, +z] ∈ [0, 1]⁶,
-    converted to a 3D net force via ``force = [right-left, up-down, fwd-back]``.
-    Physics follows MPE's ``integrate_state``: position updated with old velocity,
-    then velocity damped and force applied.
+    Each agent outputs a 3D displacement (dx, dy, dz) ∈ [-1, 1]³,
+    scaled by ``max_step`` to update its position.
 
     Parameters
     ----------
     config : Namespace
         Must contain ``env_id``; optionally ``num_agents``, ``num_landmarks``,
-        ``world_size``, ``collision_radius``, ``collision_penalty``,
-        ``max_episode_steps``, ``render_mode``, ``env_seed``,
-        ``dt``, ``damping``, ``mass``, ``max_speed``, ``flight_height``.
+        ``world_size``, ``max_step``, ``collision_radius``, ``collision_penalty``,
+        ``max_episode_steps``, ``render_mode``, ``env_seed``.
     """
 
     def __init__(self, config):
@@ -38,17 +35,11 @@ class SimpleSpreadDrones3DEnv(RawMultiAgentEnv):
         self.num_agents = getattr(config, "num_agents", 3)
         self.num_landmarks = getattr(config, "num_landmarks", 3)
         self.world_size = getattr(config, "world_size", 1.0)
+        self.max_step = getattr(config, "max_step", 0.15)
         self.collision_radius = getattr(config, "collision_radius", 0.15)
         self.collision_penalty = getattr(config, "collision_penalty", 1.0)
-        self.max_episode_steps = getattr(config, "max_episode_steps", 1600)
+        self.max_episode_steps = getattr(config, "max_episode_steps", 25)
         self.render_mode = getattr(config, "render_mode", None)
-        self.flight_height = getattr(config, "flight_height", 1.0)
-
-        # MPE dynamics parameters
-        self.dt = getattr(config, "dt", 0.1)
-        self.damping = getattr(config, "damping", 0.25)
-        self.mass = getattr(config, "mass", 1.0)
-        self.max_speed = getattr(config, "max_speed", None)
 
         seed = getattr(config, "env_seed", None)
         self._rng = np.random.default_rng(seed)
@@ -65,9 +56,9 @@ class SimpleSpreadDrones3DEnv(RawMultiAgentEnv):
             for k in self.agents
         }
 
-        # Action per agent: 6D force [−x, +x, −y, +y, −z, +z] ∈ [0, 1]
+        # Action per agent: 3D displacement direction
         self.action_space = {
-            k: Box(0.0, 1.0, shape=(6,), dtype=np.float32)
+            k: Box(-1.0, 1.0, shape=(3,), dtype=np.float32)
             for k in self.agents
         }
 
@@ -87,46 +78,22 @@ class SimpleSpreadDrones3DEnv(RawMultiAgentEnv):
 
     def reset(self):
         ws = self.world_size
-        h = self.flight_height
-        # Drone positions: XY random, Z fixed (matching demo_hierarchical_deploy.py)
-        xy = self._rng.uniform(-ws, ws, (self.num_agents, 2)).astype(np.float32)
-        self.agent_pos = np.column_stack([xy, np.full(self.num_agents, h, dtype=np.float32)])
+        self.agent_pos = self._rng.uniform(-ws, ws, (self.num_agents, 3)).astype(np.float32)
         self.agent_vel = np.zeros((self.num_agents, 3), dtype=np.float32)
-        # Landmark positions: XY random, Z fixed
-        lm_xy = self._rng.uniform(-ws, ws, (self.num_landmarks, 2)).astype(np.float32)
-        self.landmark_pos = np.column_stack([lm_xy, np.full(self.num_landmarks, h, dtype=np.float32)])
+        self.landmark_pos = self._rng.uniform(-ws, ws, (self.num_landmarks, 3)).astype(np.float32)
         self._episode_step = 0
         return self._get_obs(), {}
 
     def step(self, actions):
-        # Convert 6D force actions to 3D net force, then apply MPE dynamics
+        # Apply actions — position-based displacement
         for i, agent_key in enumerate(self.agents):
             act = np.asarray(actions[agent_key], dtype=np.float32)
-            act = np.clip(act, 0.0, 1.0)
-            # 6D → 3D net force: [right-left, up-down, forward-backward]
-            force = np.array([
-                act[1] - act[0],  # +x - (-x)
-                act[3] - act[2],  # +y - (-y)
-                act[5] - act[4],  # +z - (-z)
-            ], dtype=np.float32)
-
-            # MPE integrate_state order:
-            # 1) Position update with old velocity
-            self.agent_pos[i] += self.agent_vel[i] * self.dt
-            # 2) Velocity damping
-            self.agent_vel[i] *= (1 - self.damping)
-            # 3) Apply force
-            self.agent_vel[i] += (force / self.mass) * self.dt
-
-            # 4) Speed clamping (if max_speed is set)
-            if self.max_speed is not None:
-                speed = np.linalg.norm(self.agent_vel[i])
-                if speed > self.max_speed:
-                    self.agent_vel[i] = (self.agent_vel[i] / speed) * self.max_speed
-
-            # 5) Position clamping
+            act = np.clip(act, -1.0, 1.0)
+            displacement = act * self.max_step
+            self.agent_vel[i] = displacement
             self.agent_pos[i] = np.clip(
-                self.agent_pos[i], -self.world_size, self.world_size
+                self.agent_pos[i] + displacement,
+                -self.world_size, self.world_size
             )
 
         # Reward (shared, cooperative)
@@ -214,13 +181,13 @@ class SimpleSpreadDrones3DEnv(RawMultiAgentEnv):
         return obs_dict
 
     def _compute_reward(self):
-        # 1) Coverage: for each landmark, distance to the nearest agent (3D Euclidean)
+        # 1) Coverage: for each landmark, distance to the nearest agent
         reward = 0.0
         for lm in self.landmark_pos:
             dists = np.linalg.norm(self.agent_pos - lm, axis=1)
             reward -= float(np.min(dists))
 
-        # 2) Collision penalty: for each pair of agents (3D distance)
+        # 2) Collision penalty: for each pair of agents
         for i in range(self.num_agents):
             for j in range(i + 1, self.num_agents):
                 dist_ij = np.linalg.norm(self.agent_pos[i] - self.agent_pos[j])

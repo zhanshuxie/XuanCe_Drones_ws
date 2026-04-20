@@ -1,0 +1,65 @@
+agent: "MADDPG"
+env_name: "Drones"
+env_id: "SimpleSpreadAviary3D"
+env_seed: 1
+obs_type: "kin"
+act_type: "vel"
+num_drones: 3
+num_landmarks: 3
+world_size: 2.0
+collision_radius: 0.15
+collision_penalty: 1.0
+flight_height: 1.0
+render: False
+sleep: 0.01
+continuous_action: True
+learner: "MADDPG_Learner"
+policy: "MADDPG_Policy"
+representation: "Basic_MLP"
+vectorize: "SubprocVecMultiAgentEnv"
+runner: "MARL"
+
+# recurrent settings
+use_rnn: False
+rnn: "GRU"
+fc_hidden_sizes: [64, 64, 64]
+recurrent_hidden_size: 64
+N_recurrent_layers: 1
+dropout: 0
+normalize: "LayerNorm"
+initialize: "orthogonal"
+gain: 0.01
+
+representation_hidden_size: [128, ]
+actor_hidden_size: [128, 128]
+critic_hidden_size: [128, 128]
+activation: "relu"
+activation_action: "tanh"
+use_parameter_sharing: True
+use_actions_mask: False
+
+seed: 2
+parallels: 16
+buffer_size: 100000
+batch_size: 256
+learning_rate_actor: 0.01
+learning_rate_critic: 0.001
+gamma: 0.99
+tau: 0.001
+
+start_noise: 1.0
+end_noise: 0.01
+sigma: 0.1
+start_training: 1000
+max_episode_steps: 1600
+running_steps: 10000000
+training_frequency: 25
+
+use_grad_clip: True
+grad_clip_norm: 10.0
+
+eval_interval: 100000
+test_episode: 5
+
+log_dir: "logs/maddpg/"
+model_dir: "models/maddpg/"

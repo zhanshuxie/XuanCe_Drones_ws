@@ -113,7 +113,7 @@ class RunnerMARL(RunnerBase):
 
         # Prepare testing environments (DIRECT mode to avoid PyBullet GUI conflict).
         config_test = deepcopy(self.config)
-        config_test.parallels = 1
+        config_test.parallels = kwargs.get('test_parallels', 1)
         config_test.render = False
         test_envs = make_envs(config_test)
 

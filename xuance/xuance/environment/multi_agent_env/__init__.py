@@ -19,10 +19,10 @@ except Exception as error:
     REGISTRY_MULTI_AGENT_ENV["DroneSpread"] = str(error)
 
 try:
-    from xuance.environment.multi_agent_env.simple_spread_drones_3d import SimpleSpreadDrones3DEnv
-    REGISTRY_MULTI_AGENT_ENV['DroneSpread3D'] = SimpleSpreadDrones3DEnv
+    from xuance.environment.multi_agent_env.simple_spread_drones_3d_planner import SimpleSpreadDrones3DPlannerEnv
+    REGISTRY_MULTI_AGENT_ENV['DroneSpreadPlanner3D'] = SimpleSpreadDrones3DPlannerEnv
 except Exception as error:
-    REGISTRY_MULTI_AGENT_ENV["DroneSpread3D"] = str(error)
+    REGISTRY_MULTI_AGENT_ENV["DroneSpreadPlanner3D"] = str(error)
 
 try:
     from xuance.environment.multi_agent_env.football import GFootball_Env

@@ -1,16 +1,12 @@
 """
-分层部署脚本 — MAPPO 高层规划器 + PPO 低层导航控制器
+分层部署 + 轨迹可视化脚本
 
-将训练好的 MAPPO 规划器（SimpleSpreadDrones 2D 环境训练）与
-Navigate PPO 控制器（单无人机 A→B 飞行）拼接，在 PyBullet 中
-运行 3 架无人机无碰撞覆盖 3 个目标点。
-
-坐标映射:
-  规划器 2D 空间 [-1, 1]  ↔  物理 XY [-scale, scale] 米
-  规划器 max_step = 0.15  →  物理位移 = 0.15 × scale 米
+运行 MAPPO 高层规划器 + PPO 低层导航控制器，在 PyBullet 中
+让 3 架无人机覆盖 3 个目标点，并将飞行轨迹以 3 种颜色绘制成 3D 图。
 
 用法:
-    python demo_hierarchical_deploy.py --planner-model results/mappo/SimpleSpreadDrones/best_model/best_model.pth --navigate-model results/ppo/NavigateAviary/best_model/best_model.pth --render True
+    python visualize_hierarchical_trajectory.py
+    python visualize_hierarchical_trajectory.py --planner-model <path> --navigate-model <path> --render True
 """
 import argparse
 import numpy as np
@@ -18,6 +14,7 @@ import time
 from argparse import Namespace
 
 import pybullet as p
+import matplotlib.pyplot as plt
 from gym_pybullet_drones.utils.enums import (
     DroneModel, Physics, ActionType, ObservationType,
 )
@@ -43,17 +40,15 @@ class DeployAviary(BaseRLAviary):
     def set_waypoints(self, waypoints):
         self.waypoints = np.array(waypoints, dtype=np.float32)
 
-    # ---- abstract implementations (only _computeObs matters) ----
-
     def _computeObs(self):
         obs = np.zeros((self.NUM_DRONES, 12))
         for i in range(self.NUM_DRONES):
             state = self._getDroneStateVector(i)
             obs[i] = np.hstack([
-                state[7:10],                       # roll, pitch, yaw
-                state[10:13],                      # vx, vy, vz
-                state[13:16],                      # wx, wy, wz
-                self.waypoints[i] - state[0:3],    # relative pos to waypoint
+                state[7:10],
+                state[10:13],
+                state[13:16],
+                self.waypoints[i] - state[0:3],
             ])
         ret = obs.astype("float32")
         for k in range(self.ACTION_BUFFER_SIZE):
@@ -94,14 +89,58 @@ def build_planner_obs(drone_pos_2d, drone_vel_2d, landmark_pos_2d, n):
     return obs
 
 
+def plot_trajectories(trajectories, lm_xyz, save_path, max_low_steps):
+    """绘制 3 架无人机的 3D 轨迹图。"""
+    colors = ["#e74c3c", "#2ecc71", "#3498db"]  # 红、绿、蓝
+    labels = ["Drone 0", "Drone 1", "Drone 2"]
+
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection="3d")
+
+    for i, traj in enumerate(trajectories):
+        traj = np.array(traj)  # (T, 3)
+        # 轨迹线
+        ax.plot(traj[:, 0], traj[:, 1], traj[:, 2],
+                color=colors[i], linewidth=1.5, label=labels[i])
+        # 起始位置 — 圆形
+        ax.scatter(*traj[0], color=colors[i], marker="o", s=80,
+                   edgecolors="black", zorder=5)
+        # 终止位置 — 星形
+        ax.scatter(*traj[-1], color=colors[i], marker="*", s=150,
+                   edgecolors="black", zorder=5)
+
+    # 目标地标 — 菱形 (颜色独立于无人机)
+    target_map = [
+        (1, "#e74c3c", "Target 0"),  # 原绿色菱形 → 红色
+        (2, "#2ecc71", "Target 1"),  # 原蓝色菱形 → 绿色
+        (0, "#3498db", "Target 2"),  # 原红色菱形 → 蓝色
+    ]
+    for lm_i, tc, tl in target_map:
+        ax.scatter(*lm_xyz[lm_i], color=tc, marker="D", s=120,
+                   edgecolors="black", linewidths=1.2, zorder=5,
+                   label=tl)
+
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.set_zlabel("Z (m)")
+    ax.set_title(f"Hierarchical RL — UAV Trajectories MLS={max_low_steps}")
+    ax.legend(loc="upper left", fontsize=8)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200)
+    print(f"\n轨迹图已保存至 {save_path}")
+    plt.show()
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def parse_args():
-    pa = argparse.ArgumentParser("Hierarchical Deploy: MAPPO + Navigate PPO")
-    pa.add_argument("--planner-model", type=str, required=True,
+    pa = argparse.ArgumentParser("Hierarchical Deploy + Trajectory Visualization")
+    pa.add_argument("--planner-model", type=str,
+                    default="results/mappo/SimpleSpreadDrones/best_model/best_model.pth",
                     help="Path to trained MAPPO planner (.pth or directory)")
-    pa.add_argument("--navigate-model", type=str, required=True,
+    pa.add_argument("--navigate-model", type=str,
+                    default="results/ppo/NavigateAviary/best_model/best_model.pth",
                     help="Path to trained Navigate PPO (.pth or directory)")
     pa.add_argument("--device", type=str, default="cuda:0")
     pa.add_argument("--render", type=lambda x: x.lower() == "true", default=True)
@@ -109,9 +148,11 @@ def parse_args():
                     help="Planner 1.0 = this many physical meters")
     pa.add_argument("--flight-height", type=float, default=1.0)
     pa.add_argument("--max-high-steps", type=int, default=25)
-    pa.add_argument("--max-low-steps", type=int, default=64,
+    pa.add_argument("--max-low-steps", type=int, default=16,
                     help="Low-level steps per high-level planning step")
     pa.add_argument("--seed", type=int, default=42)
+    pa.add_argument("--save-path", type=str, default="trajectory_plot.png",
+                    help="Output path for the trajectory plot image")
     return pa.parse_args()
 
 
@@ -143,9 +184,9 @@ def main():
 
     # ---- 3. Initialise positions ----
     print("[3/4] Setting up world …")
-    N = 3                       # drones and landmarks
-    ws = 1.0                    # planner world size
-    max_step = 0.15             # planner max displacement per step
+    N = 3
+    ws = 1.0
+    max_step = 0.15
     scale = args.scale
     height = args.flight_height
 
@@ -188,66 +229,65 @@ def main():
                               basePosition=lm.tolist(),
                               physicsClientId=aviary.CLIENT)
 
-    # ---- 5. Hierarchical control loop ----
-    # 规划器维护的虚拟 2D agent 位置（初始 = 无人机初始 2D 位置）
-    planner_pos_2d = drone_pos_2d.copy()   # (N, 2), planner frame [-1, 1]
+    # ---- 轨迹记录初始化 ----
+    trajectories = [[] for _ in range(N)]
+    for i in range(N):
+        trajectories[i].append(aviary._getDroneStateVector(i)[0:3].copy())
 
-    cover_th = 0.2      # landmark 覆盖判定阈值 (m)
+    # ---- 5. Hierarchical control loop ----
+    planner_pos_2d = drone_pos_2d.copy()
+    cover_th = 0.2
 
     print("\n--- Starting hierarchical control ---")
     for hi in range(args.max_high_steps):
-        # 5-a  读取无人机实际 2D 位置（投影到规划器坐标系，用于观测）
+        # 5-a  读取无人机实际 2D 位置
         for i in range(N):
             drone_pos_2d[i] = aviary._getDroneStateVector(i)[0:2] / scale
 
-        # 5-b  构建规划器观测（用无人机实际位置）
+        # 5-b  构建规划器观测
         planner_obs = build_planner_obs(drone_pos_2d, drone_vel_2d, lm_pos_2d, N)
 
         # 5-c  MAPPO 推理
         out = planner_agent.action([planner_obs], test_mode=True)
-        act_dict = out["actions"][0]       # {agent_i: np.ndarray}
+        act_dict = out["actions"][0]
 
         # 5-d  2D 位移更新虚拟位置 → 映射为 3D 绝对航点
         wp3 = np.zeros((N, 3))
         for i in range(N):
             d2 = np.clip(act_dict[f"agent_{i}"][:2], -1, 1) * max_step
-            drone_vel_2d[i] = d2           # 记录速度供下次观测
-
-            # 更新规划器内部虚拟位置
-            planner_pos_2d[i] = np.clip(
-                drone_pos_2d[i] + d2, -ws, ws
-            )
-
-            # 航点 = 虚拟位置映射到物理空间，z 固定在目标高度
+            drone_vel_2d[i] = d2
+            planner_pos_2d[i] = np.clip(drone_pos_2d[i] + d2, -ws, ws)
             wp3[i] = np.array([
                 planner_pos_2d[i, 0] * scale,
                 planner_pos_2d[i, 1] * scale,
-                height,                     # 固定高度
+                height,
             ])
 
         aviary.set_waypoints(wp3)
 
-        # 5-e  低层控制器：固定运行 max_low_steps 步，到达航点的无人机悬停
-        reach_th = 0.05  # 到达判定阈值 (m)，距航点 < 0.05m 则发零速度悬停
+        # 5-e  低层控制器
+        reach_th = 0.05
         for _ in range(args.max_low_steps):
-            obs = aviary._computeObs()              # (N, obs_dim)
+            obs = aviary._computeObs()
             actions = np.zeros((N, 4), dtype=np.float32)
 
-            # 未到达航点的无人机走 Navigate 推理
             pending = [i for i in range(N)
                        if np.linalg.norm(aviary._getDroneStateVector(i)[0:3] - wp3[i]) >= reach_th]
             if pending:
-                obs_pending = obs[pending]           # (n_pending, obs_dim)
+                obs_pending = obs[pending]
                 obs_n = nav_agent._process_observation(obs_pending)
                 nav_out = nav_agent.action(obs_n)
                 for k, i in enumerate(pending):
                     actions[i] = nav_out["actions"][k]
-            # 已到达的 actions[i] 保持 [0,0,0,0] → 悬停
 
             aviary.step(actions)
+
+            # ---- 记录轨迹 ----
+            for i in range(N):
+                trajectories[i].append(aviary._getDroneStateVector(i)[0:3].copy())
+
             if args.render:
                 time.sleep(1.0 / 240)
-        low_used = args.max_low_steps
 
         # 5-f  状态打印
         min_dists = []
@@ -258,7 +298,7 @@ def main():
             )
         drone_heights = [f"{aviary._getDroneStateVector(i)[2]:.2f}" for i in range(N)]
         print(f"  high {hi+1:2d}/{args.max_high_steps} | "
-              f"low {low_used:3d} | "
+              f"low {args.max_low_steps:3d} | "
               f"heights {drone_heights} | "
               f"lm dists {[f'{d:.3f}' for d in min_dists]}")
 
@@ -275,6 +315,10 @@ def main():
         print(f"  Landmark {i}: {np.round(lm, 3).tolist()}")
 
     aviary.close()
+
+    # ---- 7. 绘制轨迹图 ----
+    plot_trajectories(trajectories, lm_xyz, args.save_path, args.max_low_steps)
+
     print("Done.")
 
 

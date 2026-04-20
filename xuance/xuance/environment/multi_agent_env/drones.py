@@ -9,11 +9,15 @@ import time
 from operator import itemgetter
 from xuance.environment import RawMultiAgentEnv
 try:
+    import pybullet as p
     from gym_pybullet_drones.utils.enums import DroneModel, Physics, ActionType, ObservationType
     from gym_pybullet_drones.envs.MultiHoverAviary import MultiHoverAviary as MultiHoverAviary_Official
+    from gym_pybullet_drones.envs.BaseRLAviary import BaseRLAviary
 except ImportError:
+    p = None
     DroneModel, Physics, ActionType, ObservationType = None, None, None, None
     MultiHoverAviary_Official = object
+    BaseRLAviary = object
 
 
 class MultiHoverAviary(MultiHoverAviary_Official):
@@ -175,9 +179,174 @@ class MultiHoverAviary(MultiHoverAviary_Official):
             return False
 
 
+class SimpleSpreadAviary3D(BaseRLAviary):
+    """Multi-agent RL: cooperative spread to cover landmarks using PyBullet physics.
+
+    Reward, reset, and termination follow MPE simple_spread style.
+    Action/observation spaces follow NavigateAviary (VEL actions, KIN observations).
+    """
+
+    def __init__(self,
+                 drone_model: DroneModel = DroneModel.CF2X if hasattr(DroneModel, 'CF2X') else None,
+                 num_drones: int = 3,
+                 num_landmarks: int = 3,
+                 neighbourhood_radius: float = np.inf,
+                 initial_xyzs=None,
+                 initial_rpys=None,
+                 physics: Physics = Physics.PYB if hasattr(Physics, 'PYB') else None,
+                 pyb_freq: int = 240,
+                 ctrl_freq: int = 30,
+                 gui=False,
+                 record=False,
+                 obs: ObservationType = ObservationType.KIN if hasattr(ObservationType, 'KIN') else None,
+                 act: ActionType = ActionType.VEL if hasattr(ActionType, 'VEL') else None,
+                 world_size: float = 2.0,
+                 collision_radius: float = 0.15,
+                 collision_penalty: float = 1.0,
+                 flight_height: float = 1.0,
+                 ):
+        # Set before super().__init__() because it calls _addObstacles()
+        self.EPISODE_LEN_SEC = 60  # wrapper's max_episode_steps=1600 controls truncation
+        self.NUM_LANDMARKS = num_landmarks
+        self.world_size = world_size
+        self.collision_radius = collision_radius
+        self.collision_penalty = collision_penalty
+        self.flight_height = flight_height
+        self.landmark_pos = np.zeros((num_landmarks, 3), dtype=np.float32)
+        self._landmark_visual_ids = []
+
+        super().__init__(drone_model=drone_model,
+                         num_drones=num_drones,
+                         neighbourhood_radius=neighbourhood_radius,
+                         initial_xyzs=initial_xyzs,
+                         initial_rpys=initial_rpys,
+                         physics=physics,
+                         pyb_freq=pyb_freq,
+                         ctrl_freq=ctrl_freq,
+                         gui=gui,
+                         record=record,
+                         obs=obs,
+                         act=act)
+
+    def _addObstacles(self):
+        """Randomize drone and landmark positions on each reset."""
+        self._landmark_visual_ids = []
+        ws = self.world_size
+        h = self.flight_height
+        # Randomize drone positions
+        for i in range(self.NUM_DRONES):
+            pos = [
+                np.random.uniform(-ws, ws),
+                np.random.uniform(-ws, ws),
+                h,
+            ]
+            p.resetBasePositionAndOrientation(
+                self.DRONE_IDS[i], pos,
+                p.getQuaternionFromEuler([0, 0, 0]),
+                physicsClientId=self.CLIENT,
+            )
+            p.resetBaseVelocity(
+                self.DRONE_IDS[i], [0, 0, 0], [0, 0, 0],
+                physicsClientId=self.CLIENT,
+            )
+        # Randomize landmark positions
+        for j in range(self.NUM_LANDMARKS):
+            self.landmark_pos[j] = [
+                np.random.uniform(-ws, ws),
+                np.random.uniform(-ws, ws),
+                h,
+            ]
+            if self.GUI:
+                visual = p.createVisualShape(
+                    p.GEOM_SPHERE, radius=0.05,
+                    rgbaColor=[1, 0.65, 0, 0.8],
+                    physicsClientId=self.CLIENT,
+                )
+                body_id = p.createMultiBody(
+                    baseMass=0,
+                    baseVisualShapeIndex=visual,
+                    basePosition=self.landmark_pos[j].tolist(),
+                    physicsClientId=self.CLIENT,
+                )
+                self._landmark_visual_ids.append(body_id)
+
+    def _observationSpace(self):
+        if self.OBS_TYPE == ObservationType.KIN:
+            # Per drone: drone_state(9) + rel_landmarks(3*L) + rel_agents(3*(N-1)) + action_buffer
+            core_dim = 9 + 3 * self.NUM_LANDMARKS + 3 * (self.NUM_DRONES - 1)
+            if self.ACT_TYPE in [ActionType.RPM, ActionType.VEL]:
+                act_size = 4
+            elif self.ACT_TYPE == ActionType.PID:
+                act_size = 3
+            elif self.ACT_TYPE in [ActionType.ONE_D_RPM, ActionType.ONE_D_PID]:
+                act_size = 1
+            else:
+                act_size = 4
+            total_dim = core_dim + act_size * self.ACTION_BUFFER_SIZE
+            lo = -np.inf
+            hi = np.inf
+            obs_lower = np.full((self.NUM_DRONES, total_dim), lo, dtype=np.float32)
+            obs_upper = np.full((self.NUM_DRONES, total_dim), hi, dtype=np.float32)
+            return Box(low=obs_lower, high=obs_upper, dtype=np.float32)
+        print("[ERROR] SimpleSpreadAviary3D only supports KIN observations.")
+        exit()
+
+    def _computeObs(self):
+        if self.OBS_TYPE == ObservationType.KIN:
+            core_dim = 9 + 3 * self.NUM_LANDMARKS + 3 * (self.NUM_DRONES - 1)
+            obs_core = np.zeros((self.NUM_DRONES, core_dim), dtype=np.float32)
+            # Gather all drone positions for relative computation
+            all_pos = np.array([self._getDroneStateVector(i)[0:3] for i in range(self.NUM_DRONES)])
+            for i in range(self.NUM_DRONES):
+                state = self._getDroneStateVector(i)
+                # drone_state: rpy(3) + rpy_rate(3) + vel(3) = 9
+                drone_state = np.hstack([state[7:10], state[10:13], state[13:16]])
+                # relative positions to all landmarks
+                rel_landmarks = (self.landmark_pos - state[0:3]).flatten()
+                # relative positions to other agents
+                other_idx = [j for j in range(self.NUM_DRONES) if j != i]
+                rel_agents = (all_pos[other_idx] - state[0:3]).flatten()
+                obs_core[i, :] = np.hstack([drone_state, rel_landmarks, rel_agents])
+            # Append action buffer
+            ret = obs_core.astype('float32')
+            for k in range(self.ACTION_BUFFER_SIZE):
+                ret = np.hstack([ret, np.array([self.action_buffer[k][j, :] for j in range(self.NUM_DRONES)])])
+            return ret
+        print("[ERROR] SimpleSpreadAviary3D only supports KIN observations.")
+        exit()
+
+    def _computeReward(self):
+        """Cooperative spread reward (MPE simple_spread style)."""
+        all_pos = np.array([self._getDroneStateVector(i)[0:3] for i in range(self.NUM_DRONES)])
+        # Coverage: for each landmark, distance to nearest agent
+        reward = 0.0
+        for lm in self.landmark_pos:
+            dists = np.linalg.norm(all_pos - lm, axis=1)
+            reward -= float(np.min(dists))
+        # Collision penalty
+        for i in range(self.NUM_DRONES):
+            for j in range(i + 1, self.NUM_DRONES):
+                dist_ij = np.linalg.norm(all_pos[i] - all_pos[j])
+                if dist_ij < self.collision_radius:
+                    reward -= self.collision_penalty
+        # Shared reward, shape (NUM_DRONES, 1) for wrapper compatibility
+        return np.full((self.NUM_DRONES, 1), reward, dtype=np.float32)
+
+    def _computeTerminated(self):
+        return False
+
+    def _computeTruncated(self):
+        if self.step_counter / self.PYB_FREQ > self.EPISODE_LEN_SEC:
+            return True
+        return False
+
+    def _computeInfo(self):
+        return {"episode_step": self.step_counter}
+
+
 REGISTRY = {
     "MultiHoverAviary": MultiHoverAviary,
-    # you can add your custom scenarios here.
+    "SimpleSpreadAviary3D": SimpleSpreadAviary3D,
 }
 
 
@@ -191,16 +360,29 @@ class Drones_MultiAgentEnv(RawMultiAgentEnv):
         self.env_id = config.env_id
 
         kwargs_env = {'gui': self.gui}
-        if self.env_id in ["MultiHoverAviary"]:
+        if self.env_id in ["MultiHoverAviary", "SimpleSpreadAviary3D"]:
             kwargs_env.update({'num_drones': config.num_drones,
                                'obs': ObservationType(config.obs_type),
                                'act': ActionType(config.act_type)})
+        if self.env_id in ["SimpleSpreadAviary3D"]:
+            kwargs_env.update({
+                'num_landmarks': getattr(config, 'num_landmarks', config.num_drones),
+                'world_size': getattr(config, 'world_size', 2.0),
+                'collision_radius': getattr(config, 'collision_radius', 0.15),
+                'collision_penalty': getattr(config, 'collision_penalty', 1.0),
+                'flight_height': getattr(config, 'flight_height', 1.0),
+            })
         self.env = REGISTRY[config.env_id](**kwargs_env)
         self.env.reset(seed=config.env_seed)
         self.num_agents = config.num_drones
         self.agents = [f"agent_{i}" for i in range(self.num_agents)]
 
-        self.state_space = Box(-np.inf, np.inf, shape=[20, ])
+        if self.env_id == "SimpleSpreadAviary3D":
+            n_lm = getattr(config, 'num_landmarks', config.num_drones)
+            state_dim = 3 * self.num_agents + 3 * self.num_agents + 3 * n_lm
+            self.state_space = Box(-np.inf, np.inf, shape=[state_dim, ])
+        else:
+            self.state_space = Box(-np.inf, np.inf, shape=[20, ])
         obs_shape_i = (self.env.observation_space.shape[-1],)
         act_shape_i = (self.env.action_space.shape[-1],)
         self.observation_space = {k: Box(-np.inf, np.inf, obs_shape_i) for k in self.agents}
@@ -248,6 +430,12 @@ class Drones_MultiAgentEnv(RawMultiAgentEnv):
         return {agent: True for agent in self.agents}  # 1 means available
 
     def state(self):
+        if self.env_id == "SimpleSpreadAviary3D":
+            states = np.array([self.env._getDroneStateVector(i) for i in range(self.num_agents)])
+            all_pos = states[:, 0:3].flatten()
+            all_vel = states[:, 13:16].flatten()
+            landmarks = self.env.landmark_pos.flatten()
+            return np.concatenate([all_pos, all_vel, landmarks]).astype(np.float32)
         return self.state_space.sample()
 
     def avail_actions(self):

@@ -34,3 +34,11 @@ Gemfile
 Gemfile.lock
 _config.yml
 _site/
+
+
+# new
+**/*.csv
+examples/drones/ablation/*.png
+examples/drones/ablation
+examples/drones/benchmark
+examples/drones/*.png
